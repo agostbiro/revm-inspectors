@@ -12,13 +12,15 @@ use crate::{
 use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use revm::{
     interpreter::{
-        opcode::{self},
         CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome, EOFCreateInputs,
-        InstructionResult, Interpreter, InterpreterResult, OpCode,
+        InstructionResult, Interpreter, InterpreterResult,
     },
-    primitives::SpecId,
-    Database, EvmContext, Inspector, JournalEntry,
+    EvmWiring, EvmContext, JournalEntry,
 };
+use revm::specification::hardfork::SpecId;
+use revm_bytecode::opcode;
+use revm_bytecode::opcode::OpCode;
+use revm_inspector::Inspector;
 
 mod arena;
 pub use arena::CallTraceArena;
@@ -233,7 +235,7 @@ impl TracingInspector {
     ///
     /// Returns true if the `to` address is a precompile contract and the value is zero.
     #[inline]
-    fn is_precompile_call<DB: Database>(
+    fn is_precompile_call<DB: EvmWiring>(
         &self,
         context: &EvmContext<DB>,
         to: &Address,
@@ -290,7 +292,7 @@ impl TracingInspector {
     ///
     /// Invoked on [Inspector::call].
     #[allow(clippy::too_many_arguments)]
-    fn start_trace_on_call<DB: Database>(
+    fn start_trace_on_call<DB: EvmWiring>(
         &mut self,
         context: &EvmContext<DB>,
         address: Address,
@@ -335,7 +337,7 @@ impl TracingInspector {
     /// # Panics
     ///
     /// This expects an existing trace [Self::start_trace_on_call]
-    fn fill_trace_on_call_end<DB: Database>(
+    fn fill_trace_on_call_end<DB: EvmWiring>(
         &mut self,
         _context: &mut EvmContext<DB>,
         result: &InterpreterResult,
@@ -369,7 +371,7 @@ impl TracingInspector {
     /// This expects an existing [CallTrace], in other words, this panics if not within the context
     /// of a call.
     #[cold]
-    fn start_step<DB: Database>(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn start_step<DB: EvmWiring>(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
         let trace_idx = self.last_trace_idx();
         let trace = &mut self.traces.arena[trace_idx];
 
@@ -457,7 +459,7 @@ impl TracingInspector {
     ///
     /// Invoked on [Inspector::step_end].
     #[cold]
-    fn fill_step_on_step_end<DB: Database>(
+    fn fill_step_on_step_end<DB: EvmWiring>(
         &mut self,
         interp: &mut Interpreter,
         context: &mut EvmContext<DB>,
@@ -520,25 +522,25 @@ impl TracingInspector {
     }
 }
 
-impl<DB> Inspector<DB> for TracingInspector
+impl<EvmInspectorT> Inspector<EvmInspectorT> for TracingInspector
 where
-    DB: Database,
+    EvmInspectorT: EvmWiring,
 {
     #[inline]
-    fn step(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn step(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmInspectorT>) {
         if self.config.record_steps {
             self.start_step(interp, context);
         }
     }
 
     #[inline]
-    fn step_end(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn step_end(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmInspectorT>) {
         if self.config.record_steps {
             self.fill_step_on_step_end(interp, context);
         }
     }
 
-    fn log(&mut self, _interp: &mut Interpreter, _context: &mut EvmContext<DB>, log: &Log) {
+    fn log(&mut self, _interp: &mut Interpreter, _context: &mut EvmContext<EvmInspectorT>, log: &Log) {
         if self.config.record_logs {
             let trace = self.last_trace();
             trace.ordering.push(TraceMemberOrder::Log(trace.logs.len()));
@@ -548,7 +550,7 @@ where
 
     fn call(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmInspectorT>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
         // determine correct `from` and `to` based on the call scheme
@@ -593,7 +595,7 @@ where
 
     fn call_end(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmInspectorT>,
         _inputs: &CallInputs,
         outcome: CallOutcome,
     ) -> CallOutcome {
@@ -603,7 +605,7 @@ where
 
     fn create(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmInspectorT>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
         let _ = context.load_account(inputs.caller);
@@ -624,7 +626,7 @@ where
 
     fn create_end(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmInspectorT>,
         _inputs: &CreateInputs,
         outcome: CreateOutcome,
     ) -> CreateOutcome {
@@ -634,7 +636,7 @@ where
 
     fn eofcreate(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmInspectorT>,
         inputs: &mut EOFCreateInputs,
     ) -> Option<CreateOutcome> {
         let address = if let Some(address) = inputs.kind.created_address() {
@@ -660,7 +662,7 @@ where
 
     fn eofcreate_end(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmInspectorT>,
         _inputs: &EOFCreateInputs,
         outcome: CreateOutcome,
     ) -> CreateOutcome {

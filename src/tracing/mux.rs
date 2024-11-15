@@ -9,9 +9,10 @@ use revm::{
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, EOFCreateInputs, Interpreter,
     },
-    primitives::ResultAndState,
-    Database, DatabaseRef, EvmContext, Inspector,
+    EvmWiring, DatabaseRef, EvmContext,
 };
+use revm::wiring::result::{HaltReason, ResultAndState};
+use revm_inspector::Inspector;
 use thiserror::Error;
 
 /// Mux tracing inspector that runs and collects results of multiple inspectors at once.
@@ -35,11 +36,11 @@ impl MuxInspector {
     }
 
     /// Try converting this [MuxInspector] into a [MuxFrame].
-    pub fn try_into_mux_frame<DB: DatabaseRef>(
+    pub fn try_into_mux_frame<EvmWiringT: DatabaseRef>(
         &self,
-        result: &ResultAndState,
-        db: &DB,
-    ) -> Result<MuxFrame, DB::Error> {
+        result: &ResultAndState<HaltReason>,
+        wiring: &EvmWiringT,
+    ) -> Result<MuxFrame, EvmWiringT::Error> {
         let mut frame = HashMap::with_capacity_and_hasher(self.0.len(), Default::default());
         for (tracer_type, inspector) in &self.0 {
             let trace = match inspector {
@@ -49,11 +50,11 @@ impl MuxInspector {
                     .geth_call_traces(*config, result.result.gas_used())
                     .into(),
                 DelegatingInspector::Prestate(config, inspector) => {
-                    inspector.geth_builder().geth_prestate_traces(result, config, db)?.into()
+                    inspector.geth_builder().geth_prestate_traces(result, config, wiring)?.into()
                 }
                 DelegatingInspector::Noop => NoopFrame::default().into(),
                 DelegatingInspector::Mux(inspector) => {
-                    inspector.try_into_mux_frame(result, db).map(GethTrace::MuxTracer)?
+                    inspector.try_into_mux_frame(result, wiring).map(GethTrace::MuxTracer)?
                 }
             };
 
@@ -64,33 +65,33 @@ impl MuxInspector {
     }
 }
 
-impl<DB> Inspector<DB> for MuxInspector
+impl<EvmWiringT> Inspector<EvmWiringT> for MuxInspector
 where
-    DB: Database,
+    EvmWiringT: EvmWiring,
 {
     #[inline]
-    fn initialize_interp(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn initialize_interp(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmWiringT>) {
         for (_, inspector) in &mut self.0 {
             inspector.initialize_interp(interp, context);
         }
     }
 
     #[inline]
-    fn step(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn step(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmWiringT>) {
         for (_, inspector) in &mut self.0 {
             inspector.step(interp, context);
         }
     }
 
     #[inline]
-    fn step_end(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn step_end(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmWiringT>) {
         for (_, inspector) in &mut self.0 {
             inspector.step_end(interp, context);
         }
     }
 
     #[inline]
-    fn log(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>, log: &Log) {
+    fn log(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmWiringT>, log: &Log) {
         for (_, inspector) in &mut self.0 {
             inspector.log(interp, context, log);
         }
@@ -99,7 +100,7 @@ where
     #[inline]
     fn call(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
         for (_, inspector) in &mut self.0 {
@@ -114,7 +115,7 @@ where
     #[inline]
     fn call_end(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &CallInputs,
         outcome: CallOutcome,
     ) -> CallOutcome {
@@ -129,7 +130,7 @@ where
     #[inline]
     fn create(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
         for (_, inspector) in &mut self.0 {
@@ -144,7 +145,7 @@ where
     #[inline]
     fn create_end(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &CreateInputs,
         outcome: CreateOutcome,
     ) -> CreateOutcome {
@@ -159,7 +160,7 @@ where
     #[inline]
     fn eofcreate(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut EOFCreateInputs,
     ) -> Option<CreateOutcome> {
         for (_, inspector) in &mut self.0 {
@@ -174,7 +175,7 @@ where
     #[inline]
     fn eofcreate_end(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &EOFCreateInputs,
         outcome: CreateOutcome,
     ) -> CreateOutcome {
@@ -189,7 +190,7 @@ where
     #[inline]
     fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
         for (_, inspector) in &mut self.0 {
-            inspector.selfdestruct::<DB>(contract, target, value);
+            inspector.selfdestruct::<EvmWiringT>(contract, target, value);
         }
     }
 }
@@ -260,10 +261,10 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn initialize_interp<DB: Database>(
+    fn initialize_interp<EvmWiringT: EvmWiring>(
         &mut self,
         interp: &mut Interpreter,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
     ) {
         match self {
             DelegatingInspector::FourByte(inspector) => {
@@ -279,7 +280,7 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn step<DB: Database>(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn step<EvmWiringT: EvmWiring>(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmWiringT>) {
         match self {
             DelegatingInspector::FourByte(inspector) => inspector.step(interp, context),
             DelegatingInspector::Call(_, inspector) => inspector.step(interp, context),
@@ -290,7 +291,7 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn step_end<DB: Database>(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn step_end<EvmWiringT: EvmWiring>(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmWiringT>) {
         match self {
             DelegatingInspector::FourByte(inspector) => inspector.step_end(interp, context),
             DelegatingInspector::Call(_, inspector) => inspector.step_end(interp, context),
@@ -301,10 +302,10 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn log<DB: Database>(
+    fn log<EvmWiringT: EvmWiring>(
         &mut self,
         interp: &mut Interpreter,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         log: &Log,
     ) {
         match self {
@@ -317,9 +318,9 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn call<DB: Database>(
+    fn call<EvmWiringT: EvmWiring>(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
         match self {
@@ -334,9 +335,9 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn call_end<DB: Database>(
+    fn call_end<EvmWiringT: EvmWiring>(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &CallInputs,
         outcome: CallOutcome,
     ) -> CallOutcome {
@@ -354,9 +355,9 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn create<DB: Database>(
+    fn create<EvmWiringT: EvmWiring>(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
         match self {
@@ -371,9 +372,9 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn create_end<DB: Database>(
+    fn create_end<EvmWiringT: EvmWiring>(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &CreateInputs,
         outcome: CreateOutcome,
     ) -> CreateOutcome {
@@ -393,9 +394,9 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn eofcreate<DB: Database>(
+    fn eofcreate<EvmWiringT: EvmWiring>(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut EOFCreateInputs,
     ) -> Option<CreateOutcome> {
         match self {
@@ -410,9 +411,9 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn eofcreate_end<DB: Database>(
+    fn eofcreate_end<EvmWiringT: EvmWiring>(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &EOFCreateInputs,
         outcome: CreateOutcome,
     ) -> CreateOutcome {
@@ -434,26 +435,26 @@ impl DelegatingInspector {
     }
 
     #[inline]
-    fn selfdestruct<DB: Database>(&mut self, contract: Address, target: Address, value: U256) {
+    fn selfdestruct<EvmWiringT: EvmWiring>(&mut self, contract: Address, target: Address, value: U256) {
         match self {
             DelegatingInspector::FourByte(inspector) => {
-                <FourByteInspector as Inspector<DB>>::selfdestruct(
+                <FourByteInspector as Inspector<EvmWiringT>>::selfdestruct(
                     inspector, contract, target, value,
                 )
             }
             DelegatingInspector::Call(_, inspector) => {
-                <TracingInspector as Inspector<DB>>::selfdestruct(
+                <TracingInspector as Inspector<EvmWiringT>>::selfdestruct(
                     inspector, contract, target, value,
                 )
             }
             DelegatingInspector::Prestate(_, inspector) => {
-                <TracingInspector as Inspector<DB>>::selfdestruct(
+                <TracingInspector as Inspector<EvmWiringT>>::selfdestruct(
                     inspector, contract, target, value,
                 )
             }
             DelegatingInspector::Noop => {}
             DelegatingInspector::Mux(inspector) => {
-                <MuxInspector as Inspector<DB>>::selfdestruct(inspector, contract, target, value)
+                <MuxInspector as Inspector<EvmWiringT>>::selfdestruct(inspector, contract, target, value)
             }
         }
     }

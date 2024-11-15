@@ -10,14 +10,13 @@ use alloy_rpc_types_trace::geth::{
     AccountChangeKind, AccountState, CallConfig, CallFrame, DefaultFrame, DiffMode,
     GethDefaultTracingOptions, PreStateConfig, PreStateFrame, PreStateMode, StructLog,
 };
-use revm::{
-    db::DatabaseRef,
-    primitives::{EvmState, ResultAndState},
-};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, VecDeque},
 };
+use revm::DatabaseRef;
+use revm::state::EvmState;
+use revm::wiring::result::{HaltReason, ResultAndState};
 
 /// A type for creating geth style traces
 #[derive(Clone, Debug)]
@@ -225,7 +224,7 @@ impl<'a> GethTraceBuilder<'a> {
     /// * `db` - The database to fetch state pre-transaction execution.
     pub fn geth_prestate_traces<DB: DatabaseRef>(
         &self,
-        ResultAndState { state, .. }: &ResultAndState,
+        ResultAndState { state, .. }: &ResultAndState<HaltReason>,
         prestate_config: &PreStateConfig,
         db: DB,
     ) -> Result<PreStateFrame, DB::Error> {

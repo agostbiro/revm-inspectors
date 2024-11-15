@@ -1,8 +1,11 @@
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::{AccessList, AccessListItem};
+use revm_bytecode::opcode;
+use revm_inspector::{Inspector};
 use revm::{
-    interpreter::{opcode, Interpreter},
-    Database, EvmContext, Inspector,
+    EvmWiring,
+    interpreter::{Interpreter},
+    EvmContext,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -58,11 +61,11 @@ impl AccessListInspector {
     }
 }
 
-impl<DB> Inspector<DB> for AccessListInspector
+impl<EvmWiringT> Inspector<EvmWiringT> for AccessListInspector
 where
-    DB: Database,
+    EvmWiringT: EvmWiring,
 {
-    fn step(&mut self, interp: &mut Interpreter, _context: &mut EvmContext<DB>) {
+    fn step(&mut self, interp: &mut Interpreter, _context: &mut EvmContext<EvmWiringT>) {
         match interp.current_opcode() {
             opcode::SLOAD | opcode::SSTORE => {
                 if let Ok(slot) = interp.stack().peek(0) {

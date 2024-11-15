@@ -1,25 +1,31 @@
 use alloy_primitives::{Address, Bytes, U256};
 use colorchoice::ColorChoice;
 use revm::{
-    db::{CacheDB, EmptyDB},
-    inspector_handle_register,
-    primitives::{
-        BlockEnv, EVMError, Env, EnvWithHandlerCfg, ExecutionResult, HandlerCfg, ResultAndState,
-        SpecId, TransactTo, TxEnv,
+    database_interface::EmptyDB,
+    specification::hardfork::SpecId,
+    wiring::{
+        default::{block::BlockEnv, CfgEnv, Env, TransactTo, TxEnv},
+        result::{EVMError, ExecutionResult, HaltReason, InvalidTransaction, ResultAndState},
+        EthereumWiring,
     },
-    Database, DatabaseCommit, GetInspector,
+    Database, DatabaseCommit,
 };
+use revm_database::CacheDB;
+use revm_inspector::{inspector_handle_register, Inspector};
 use revm_inspectors::tracing::{
     TraceWriter, TraceWriterConfig, TracingInspector, TracingInspectorConfig,
 };
-use std::convert::Infallible;
+use revm_wiring::{EvmWiring, TransactionValidation};
+use std::{convert::Infallible, fmt::Debug};
 
 type TestDb = CacheDB<EmptyDB>;
+pub type TestWiring<'a, InspectorT> = EthereumWiring<&'a mut TestDb, InspectorT>;
 
 #[derive(Clone, Debug)]
 pub struct TestEvm {
     pub db: TestDb,
-    pub env: EnvWithHandlerCfg,
+    pub env: Box<Env<BlockEnv, TxEnv>>,
+    pub spec_id: SpecId,
 }
 
 impl Default for TestEvm {
@@ -31,24 +37,25 @@ impl Default for TestEvm {
 impl TestEvm {
     pub fn new() -> Self {
         let db = CacheDB::new(EmptyDB::default());
-        let env = EnvWithHandlerCfg::new(
-            Box::new(Env {
-                block: BlockEnv { gas_limit: U256::MAX, ..Default::default() },
-                tx: TxEnv { gas_limit: u64::MAX, gas_price: U256::ZERO, ..Default::default() },
-                ..Default::default()
-            }),
-            HandlerCfg::new(SpecId::CANCUN),
+        let env = Env::boxed(
+            CfgEnv::default(),
+            BlockEnv { gas_limit: U256::MAX, ..Default::default() },
+            TxEnv { gas_limit: u64::MAX, gas_price: U256::ZERO, ..Default::default() },
         );
-        Self { db, env }
+        Self { db, env, spec_id: SpecId::CANCUN }
+    }
+
+    pub fn disable_nonce_check(&mut self) {
+        self.env.cfg.disable_nonce_check = true;
     }
 
     pub fn new_with_spec_id(spec_id: SpecId) -> Self {
         let mut evm = Self::new();
-        evm.env.handler_cfg.spec_id = spec_id;
+        evm.spec_id = spec_id;
         evm
     }
 
-    pub fn env_with_tx(&self, tx_env: TxEnv) -> EnvWithHandlerCfg {
+    pub fn env_with_tx(&self, tx_env: TxEnv) -> Box<Env<BlockEnv, TxEnv>> {
         let mut env = self.env.clone();
         env.tx = tx_env;
         env
@@ -59,24 +66,34 @@ impl TestEvm {
             .expect("failed to deploy contract")
     }
 
-    pub fn deploy<I: for<'a> GetInspector<&'a mut TestDb>>(
+    pub fn deploy<InspectorT>(
         &mut self,
         data: Bytes,
-        inspector: I,
-    ) -> Result<Address, EVMError<Infallible>> {
+        inspector: InspectorT,
+    ) -> Result<Address, EVMError<Infallible, InvalidTransaction>>
+    where
+        InspectorT: for<'a> Inspector<EthereumWiring<&'a mut TestDb, InspectorT>> + Debug,
+    {
         let (_, address) = self.try_deploy(data, inspector)?;
         Ok(address.expect("failed to deploy contract"))
     }
 
-    pub fn try_deploy<I: for<'a> GetInspector<&'a mut TestDb>>(
+    pub fn try_deploy<InspectorT>(
         &mut self,
         data: Bytes,
-        inspector: I,
-    ) -> Result<(ExecutionResult, Option<Address>), EVMError<Infallible>> {
+        inspector: InspectorT,
+    ) -> Result<
+        (ExecutionResult<HaltReason>, Option<Address>),
+        EVMError<Infallible, InvalidTransaction>,
+    >
+    where
+        InspectorT: for<'a> Inspector<EthereumWiring<&'a mut TestDb, InspectorT>> + Debug,
+    {
         self.env.tx.data = data;
         self.env.tx.transact_to = TransactTo::Create;
 
-        let (ResultAndState { result, state }, env) = self.inspect(inspector)?;
+        let (ResultAndState::<HaltReason> { result, state }, env) =
+            self.inspect::<InspectorT>(inspector)?;
         self.db.commit(state);
         self.env = env;
         match &result {
@@ -88,12 +105,15 @@ impl TestEvm {
         }
     }
 
-    pub fn call<I: for<'a> GetInspector<&'a mut TestDb>>(
+    pub fn call<InspectorT>(
         &mut self,
         address: Address,
         data: Bytes,
-        inspector: I,
-    ) -> Result<ExecutionResult, EVMError<Infallible>> {
+        inspector: InspectorT,
+    ) -> Result<ExecutionResult<HaltReason>, EVMError<Infallible, InvalidTransaction>>
+    where
+        InspectorT: for<'a> Inspector<EthereumWiring<&'a mut TestDb, InspectorT>> + Debug,
+    {
         self.env.tx.data = data;
         self.env.tx.transact_to = TransactTo::Call(address);
         let (ResultAndState { result, state }, env) = self.inspect(inspector)?;
@@ -102,32 +122,55 @@ impl TestEvm {
         Ok(result)
     }
 
-    pub fn inspect<I: for<'a> GetInspector<&'a mut TestDb>>(
+    pub fn inspect<InspectorT>(
         &mut self,
-        inspector: I,
-    ) -> Result<(ResultAndState, EnvWithHandlerCfg), EVMError<Infallible>> {
-        inspect(&mut self.db, self.env.clone(), inspector)
+        inspector: InspectorT,
+    ) -> Result<
+        (ResultAndState<HaltReason>, Box<Env<BlockEnv, TxEnv>>),
+        EVMError<Infallible, InvalidTransaction>,
+    >
+    where
+        InspectorT: for<'a> Inspector<EthereumWiring<&'a mut TestDb, InspectorT>> + Debug,
+    {
+        inspect::<EthereumWiring<&mut TestDb, InspectorT>>(
+            &mut self.db,
+            self.env.clone(),
+            self.spec_id,
+            inspector,
+        )
     }
 }
 
 /// Executes the [EnvWithHandlerCfg] against the given [Database] without committing state changes.
-pub fn inspect<DB, I>(
-    db: DB,
-    env: EnvWithHandlerCfg,
-    inspector: I,
-) -> Result<(ResultAndState, EnvWithHandlerCfg), EVMError<DB::Error>>
+pub fn inspect<'a, EvmWiringT>(
+    db: EvmWiringT::Database,
+    env: Box<Env<<EvmWiringT as EvmWiring>::Block, <EvmWiringT as EvmWiring>::Transaction>>,
+    spec_id: EvmWiringT::Hardfork,
+    inspector: EvmWiringT::ExternalContext,
+) -> Result<
+    (ResultAndState<EvmWiringT::HaltReason>, Box<Env<EvmWiringT::Block, EvmWiringT::Transaction>>),
+    EVMError<
+        <<EvmWiringT as EvmWiring>::Database as Database>::Error,
+        <<EvmWiringT as EvmWiring>::Transaction as TransactionValidation>::ValidationError,
+    >,
+>
 where
-    DB: Database,
-    I: GetInspector<DB>,
+    EvmWiringT: revm::EvmWiring + 'a,
+    <EvmWiringT as EvmWiring>::Transaction: Default,
+    <<EvmWiringT as EvmWiring>::Transaction as TransactionValidation>::ValidationError:
+        From<InvalidTransaction>,
+    <EvmWiringT as EvmWiring>::Block: Default,
+    <EvmWiringT as EvmWiring>::ExternalContext: Inspector<EvmWiringT>,
 {
-    let mut evm = revm::Evm::builder()
+    let mut evm = revm::Evm::<'a, EvmWiringT>::builder()
         .with_db(db)
         .with_external_context(inspector)
-        .with_env_with_handler_cfg(env)
+        .with_env(env)
+        .with_spec_id(spec_id)
         .append_handler_register(inspector_handle_register)
         .build();
     let res = evm.transact()?;
-    let (_, env) = evm.into_db_and_env_with_handler_cfg();
+    let (_, env, _) = evm.into_db_and_env_with_handler_cfg();
     Ok((res, env))
 }
 
@@ -151,7 +194,7 @@ pub fn deploy_contract(code: Bytes, deployer: Address, spec_id: SpecId) -> (Addr
     let mut evm = TestEvm::new();
 
     evm.env.tx.caller = deployer;
-    evm.env.handler_cfg = HandlerCfg::new(spec_id);
+    evm.spec_id = spec_id;
 
     (evm.simple_deploy(code), evm)
 }

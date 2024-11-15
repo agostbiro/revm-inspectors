@@ -1,16 +1,17 @@
 //! Transfer tests
 
+use crate::utils::{inspect, TestWiring};
 use alloy_primitives::{hex, Address, U256};
 use revm::{
-    db::{CacheDB, EmptyDB},
-    primitives::{
-        BlockEnv, CfgEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg, ExecutionResult, HandlerCfg,
-        Output, SpecId, TransactTo, TxEnv,
+    database_interface::EmptyDB,
+    specification::hardfork::SpecId,
+    wiring::{
+        default::{block::BlockEnv, CfgEnv, Env, TransactTo, TxEnv},
+        result::{ExecutionResult, Output},
     },
     DatabaseCommit,
 };
-
-use crate::utils::inspect;
+use revm_database::CacheDB;
 use revm_inspectors::{
     tracing::{TracingInspector, TracingInspectorConfig},
     transfer::{TransferInspector, TransferKind, TransferOperation},
@@ -31,25 +32,21 @@ fn test_internal_transfers() {
     let deployer = Address::ZERO;
 
     let mut db = CacheDB::new(EmptyDB::default());
-
-    let cfg = CfgEnvWithHandlerCfg::new(CfgEnv::default(), HandlerCfg::new(SpecId::LONDON));
-
-    let env = EnvWithHandlerCfg::new_with_cfg_env(
-        cfg.clone(),
-        BlockEnv::default(),
-        TxEnv {
-            caller: deployer,
-            gas_limit: 1000000,
-            transact_to: TransactTo::Create,
-            data: code.into(),
-            ..Default::default()
-        },
-    );
+    let spec_id = SpecId::LONDON;
+    let tx_env = TxEnv {
+        caller: deployer,
+        gas_limit: 1000000,
+        transact_to: TransactTo::Create,
+        data: code.into(),
+        ..Default::default()
+    };
+    let env = Env::boxed(CfgEnv::default(), BlockEnv::default(), tx_env);
 
     let mut insp = TracingInspector::new(TracingInspectorConfig::default_geth());
 
     // Create contract
-    let (res, _) = inspect(&mut db, env, &mut insp).unwrap();
+    let (res, _) =
+        inspect::<TestWiring<'_, &mut TracingInspector>>(&mut db, env, spec_id, &mut insp).unwrap();
     let addr = match res.result {
         ExecutionResult::Success { output, .. } => match output {
             Output::Create(_, addr) => addr.unwrap(),
@@ -74,8 +71,12 @@ fn test_internal_transfers() {
 
     let mut insp = TransferInspector::new(false);
 
-    let env = EnvWithHandlerCfg::new_with_cfg_env(cfg.clone(), BlockEnv::default(), tx_env.clone());
-    let (res, _) = inspect(&mut db, env, &mut insp).unwrap();
+    let mut env = Env::boxed(CfgEnv::default(), BlockEnv::default(), tx_env.clone());
+    // `CfgEnv` is marked as `non_exhaustive`, so we need to set the nonce manually.
+    env.cfg.disable_nonce_check = true;
+    let (res, _) =
+        inspect::<TestWiring<'_, &mut TransferInspector>>(&mut db, env, spec_id, &mut insp)
+            .unwrap();
     assert!(res.result.is_success());
 
     assert_eq!(insp.transfers().len(), 2);
@@ -100,9 +101,12 @@ fn test_internal_transfers() {
 
     let mut insp = TransferInspector::internal_only();
 
-    let env = EnvWithHandlerCfg::new_with_cfg_env(cfg, BlockEnv::default(), tx_env);
+    let mut env = Env::boxed(CfgEnv::default(), BlockEnv::default(), tx_env);
+    env.cfg.disable_nonce_check = true;
 
-    let (res, _) = inspect(&mut db, env, &mut insp).unwrap();
+    let (res, _) =
+        inspect::<TestWiring<'_, &mut TransferInspector>>(&mut db, env, spec_id, &mut insp)
+            .unwrap();
     assert!(res.result.is_success());
 
     assert_eq!(insp.transfers().len(), 1);

@@ -31,6 +31,7 @@ fn test_trace_printing() {
 
     let mut call = |data: Vec<u8>| {
         let mut tracer = TracingInspector::new(TracingInspectorConfig::all());
+        evm.disable_nonce_check();
         let r = evm.call(address, data.into(), &mut tracer).unwrap();
         assert!(r.is_success(), "evm.call reverted: {r:#?}");
 

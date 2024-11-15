@@ -4,8 +4,10 @@ use revm::{
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, CreateScheme, EOFCreateKind,
     },
-    Database, EvmContext, Inspector, JournaledState,
+    EvmWiring, EvmContext, JournaledState,
 };
+use revm_inspector::Inspector;
+use revm::wiring::Transaction;
 
 /// Sender of ETH transfer log per `eth_simulateV1` spec.
 ///
@@ -96,13 +98,13 @@ impl TransferInspector {
     }
 }
 
-impl<DB> Inspector<DB> for TransferInspector
+impl<EvmWiringT> Inspector<EvmWiringT> for TransferInspector
 where
-    DB: Database,
+    EvmWiringT: EvmWiring,
 {
     fn call(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
         if let Some(value) = inputs.transfer_value() {
@@ -120,7 +122,7 @@ where
 
     fn create(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
         let nonce = context.journaled_state.account(inputs.caller).info.nonce;
@@ -138,15 +140,13 @@ where
 
     fn eofcreate(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut revm::interpreter::EOFCreateInputs,
     ) -> Option<CreateOutcome> {
         let address = match inputs.kind {
             EOFCreateKind::Tx { .. } => {
                 let nonce =
-                    context.env.tx.nonce.unwrap_or_else(|| {
-                        context.journaled_state.account(inputs.caller).info.nonce
-                    });
+                    context.env.tx.nonce();
                 inputs.caller.create(nonce)
             }
             EOFCreateKind::Opcode { created_address, .. } => created_address,

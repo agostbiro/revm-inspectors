@@ -1,8 +1,11 @@
 //! Geth Js tracer tests
 
-use crate::utils::{deploy_contract, inspect};
+use crate::utils::{deploy_contract, inspect, TestWiring};
 use alloy_primitives::{hex, Address};
-use revm::primitives::{SpecId, TransactTo, TxEnv};
+use revm::{
+    specification::hardfork::SpecId,
+    wiring::default::{TransactTo, TxEnv},
+};
 use revm_inspectors::tracing::js::JsInspector;
 
 #[test]
@@ -43,9 +46,11 @@ fn test_geth_jstracer_revert() {
         data: hex!("c2985578").into(), // call foo
         ..Default::default()
     });
+    env.cfg.disable_nonce_check = true;
 
     let mut insp = JsInspector::new(code.to_string(), serde_json::Value::Null).unwrap();
-    let (res, _) = inspect(&mut evm.db, env.clone(), &mut insp).unwrap();
+    let (res, _) =
+        inspect::<TestWiring<'_, _>>(&mut evm.db, env.clone(), evm.spec_id, &mut insp).unwrap();
     assert!(res.result.is_success());
 
     let result = insp.json_result(res, &env, &evm.db).unwrap();
@@ -62,7 +67,8 @@ fn test_geth_jstracer_revert() {
         ..Default::default()
     };
     let mut insp = JsInspector::new(code.to_string(), serde_json::Value::Null).unwrap();
-    let (res, _) = inspect(&mut evm.db, env.clone(), &mut insp).unwrap();
+    let (res, _) =
+        inspect::<TestWiring<'_, _>>(&mut evm.db, env.clone(), evm.spec_id, &mut insp).unwrap();
     assert!(!res.result.is_success());
 
     let result = insp.json_result(res, &env, &evm.db).unwrap();

@@ -18,9 +18,14 @@ use revm::{
         return_revert, CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome, Gas,
         InstructionResult, Interpreter, InterpreterResult,
     },
-    primitives::{Env, ExecutionResult, Output, ResultAndState, TransactTo},
-    ContextPrecompiles, Database, DatabaseRef, EvmContext, Inspector,
+    wiring::{
+        default::{block::BlockEnv, Env, TransactTo, TxEnv},
+        result::{ExecutionResult, HaltReason, ResultAndState},
+    },
+    ContextPrecompiles, DatabaseRef, EvmContext, EvmWiring,
 };
+use revm_inspector::Inspector;
+use revm_wiring::result::Output;
 
 pub(crate) mod bindings;
 pub(crate) mod builtins;
@@ -207,8 +212,8 @@ impl JsInspector {
     /// Note: This is supposed to be called after the inspection has finished.
     pub fn json_result<DB>(
         &mut self,
-        res: ResultAndState,
-        env: &Env,
+        res: ResultAndState<HaltReason>,
+        env: &Env<BlockEnv, TxEnv>,
         db: &DB,
     ) -> Result<serde_json::Value, JsInspectorError>
     where
@@ -222,8 +227,8 @@ impl JsInspector {
     /// Calls the result function and returns the result.
     pub fn result<DB>(
         &mut self,
-        res: ResultAndState,
-        env: &Env,
+        res: ResultAndState<HaltReason>,
+        env: &Env<BlockEnv, TxEnv>,
         db: &DB,
     ) -> Result<JsValue, JsInspectorError>
     where
@@ -373,7 +378,10 @@ impl JsInspector {
     }
 
     /// Registers the precompiles in the JS context
-    fn register_precompiles<DB: Database>(&mut self, precompiles: &ContextPrecompiles<DB>) {
+    fn register_precompiles<EvmWiringT: EvmWiring>(
+        &mut self,
+        precompiles: &ContextPrecompiles<EvmWiringT>,
+    ) {
         if !self.precompiles_registered {
             return;
         }
@@ -385,17 +393,18 @@ impl JsInspector {
     }
 }
 
-impl<DB> Inspector<DB> for JsInspector
+impl<EvmWiringT> Inspector<EvmWiringT> for JsInspector
 where
-    DB: Database + DatabaseRef,
-    <DB as DatabaseRef>::Error: std::fmt::Display,
+    EvmWiringT: EvmWiring,
+    <EvmWiringT as revm_wiring::EvmWiring>::Database: DatabaseRef,
+    <<EvmWiringT as revm_wiring::EvmWiring>::Database as DatabaseRef>::Error: std::fmt::Display,
 {
-    fn step(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn step(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmWiringT>) {
         if self.step_fn.is_none() {
             return;
         }
 
-        let (db, _db_guard) = EvmDbRef::new(&context.journaled_state.state, &context.db);
+        let (db, _db_guard) = EvmDbRef::new(&context.journaled_state.state, &context.inner.db);
 
         let (stack, _stack_guard) = StackRef::new(&interp.stack);
         let (memory, _memory_guard) = MemoryRef::new(&interp.shared_memory);
@@ -417,13 +426,13 @@ where
         }
     }
 
-    fn step_end(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
+    fn step_end(&mut self, interp: &mut Interpreter, context: &mut EvmContext<EvmWiringT>) {
         if self.step_fn.is_none() {
             return;
         }
 
         if matches!(interp.instruction_result, return_revert!()) {
-            let (db, _db_guard) = EvmDbRef::new(&context.journaled_state.state, &context.db);
+            let (db, _db_guard) = EvmDbRef::new(&context.journaled_state.state, &context.inner.db);
 
             let (stack, _stack_guard) = StackRef::new(&interp.stack);
             let (memory, _memory_guard) = MemoryRef::new(&interp.shared_memory);
@@ -444,11 +453,17 @@ where
         }
     }
 
-    fn log(&mut self, _interp: &mut Interpreter, _context: &mut EvmContext<DB>, _log: &Log) {}
+    fn log(
+        &mut self,
+        _interp: &mut Interpreter,
+        _context: &mut EvmContext<EvmWiringT>,
+        _log: &Log,
+    ) {
+    }
 
     fn call(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut CallInputs,
     ) -> Option<CallOutcome> {
         self.register_precompiles(&context.precompiles);
@@ -489,7 +504,7 @@ where
 
     fn call_end(
         &mut self,
-        _context: &mut EvmContext<DB>,
+        _context: &mut EvmContext<EvmWiringT>,
         _inputs: &CallInputs,
         mut outcome: CallOutcome,
     ) -> CallOutcome {
@@ -511,7 +526,7 @@ where
 
     fn create(
         &mut self,
-        context: &mut EvmContext<DB>,
+        context: &mut EvmContext<EvmWiringT>,
         inputs: &mut CreateInputs,
     ) -> Option<CreateOutcome> {
         self.register_precompiles(&context.precompiles);
@@ -542,7 +557,7 @@ where
 
     fn create_end(
         &mut self,
-        _context: &mut EvmContext<DB>,
+        _context: &mut EvmContext<EvmWiringT>,
         _inputs: &CreateInputs,
         mut outcome: CreateOutcome,
     ) -> CreateOutcome {
@@ -639,13 +654,13 @@ mod tests {
     use super::*;
 
     use alloy_primitives::{hex, Address};
-    use revm::{
-        db::{CacheDB, EmptyDB},
-        inspector_handle_register,
-        primitives::{
-            AccountInfo, BlockEnv, Bytecode, CfgEnv, CfgEnvWithHandlerCfg, EnvWithHandlerCfg,
-            HandlerCfg, SpecId, TransactTo, TxEnv,
-        },
+    use revm::{database_interface::EmptyDB, state::AccountInfo};
+    use revm_bytecode::Bytecode;
+    use revm_database::CacheDB;
+    use revm_inspector::inspector_handle_register;
+    use revm_wiring::{
+        default::{CfgEnv, TransactTo},
+        EthereumWiring,
     };
     use serde_json::json;
 
@@ -692,14 +707,14 @@ mod tests {
             AccountInfo {
                 code: Some(Bytecode::LegacyRaw(
                     /* PUSH1 1, PUSH1 1, STOP */
-                    contract.unwrap_or_else(|| hex!("6001600100").into()),
+                    contract.unwrap_or_else(|| hex!("6001600100").into()).into(),
                 )),
                 ..Default::default()
             },
         );
 
-        let cfg = CfgEnvWithHandlerCfg::new(CfgEnv::default(), HandlerCfg::new(SpecId::CANCUN));
-        let env = EnvWithHandlerCfg::new_with_cfg_env(
+        let cfg = CfgEnv::default();
+        let env = Env::boxed(
             cfg.clone(),
             BlockEnv::default(),
             TxEnv {
@@ -712,10 +727,10 @@ mod tests {
 
         let mut insp = JsInspector::new(code.to_string(), serde_json::Value::Null).unwrap();
 
-        let res = revm::Evm::builder()
+        let res = revm::Evm::<EthereumWiring<_, _>>::builder()
             .with_db(db.clone())
             .with_external_context(&mut insp)
-            .with_env_with_handler_cfg(env.clone())
+            .with_env(env.clone())
             .append_handler_register(inspector_handle_register)
             .build()
             .transact()

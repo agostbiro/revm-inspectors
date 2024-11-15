@@ -1,17 +1,21 @@
 //! Parity tests
 
-use crate::utils::{inspect, print_traces, TestEvm};
+use crate::utils::{inspect, print_traces, TestEvm, TestWiring};
 use alloy_primitives::{address, hex, map::HashSet, Address, U256};
 use alloy_rpc_types_eth::TransactionInfo;
 use alloy_rpc_types_trace::parity::{Action, CallAction, CallType, SelfdestructAction, TraceType};
 use revm::{
-    db::{CacheDB, EmptyDB},
-    primitives::{
-        AccountInfo, BlobExcessGasAndPrice, BlockEnv, CfgEnv, CfgEnvWithHandlerCfg,
-        EnvWithHandlerCfg, ExecutionResult, HandlerCfg, Output, SpecId, TransactTo, TxEnv,
+    database_interface::EmptyDB,
+    specification::hardfork::SpecId,
+    state::AccountInfo,
+    wiring::{
+        block::BlobExcessGasAndPrice,
+        default::{block::BlockEnv, CfgEnv, Env, TransactTo, TxEnv},
+        result::{ExecutionResult, Output},
     },
     DatabaseCommit,
 };
+use revm_database::CacheDB;
 use revm_inspectors::tracing::{
     parity::populate_state_diff, TracingInspector, TracingInspectorConfig,
 };
@@ -43,6 +47,7 @@ fn test_parity_selfdestruct(spec_id: SpecId) {
     let value = U256::from(69);
 
     let mut evm = TestEvm::new_with_spec_id(spec_id);
+    evm.disable_nonce_check();
     evm.db.insert_account_info(deployer, AccountInfo { balance: value, ..Default::default() });
     evm.env.tx.caller = deployer;
     evm.env.tx.value = value;
@@ -59,7 +64,9 @@ fn test_parity_selfdestruct(spec_id: SpecId) {
         ..Default::default()
     });
 
-    let (res, _) = inspect(&mut evm.db, env, &mut insp).unwrap();
+    let (res, _) =
+        inspect::<TestWiring<'_, &mut TracingInspector>>(&mut evm.db, env, evm.spec_id, &mut insp)
+            .unwrap();
     assert!(res.result.is_success(), "{res:#?}");
 
     assert_eq!(insp.traces().nodes().len(), 1);
@@ -107,6 +114,7 @@ fn test_parity_constructor_selfdestruct() {
     let deployer = Address::ZERO;
 
     let mut evm = TestEvm::new_with_spec_id(SpecId::LONDON);
+    evm.disable_nonce_check();
     evm.env.tx.caller = deployer;
 
     let mut insp = TracingInspector::new(TracingInspectorConfig::default_parity());
@@ -123,7 +131,9 @@ fn test_parity_constructor_selfdestruct() {
         ..Default::default()
     });
 
-    let (res, _) = inspect(&mut evm.db, env, &mut insp).unwrap();
+    let (res, _) =
+        inspect::<TestWiring<'_, &mut TracingInspector>>(&mut evm.db, env, evm.spec_id, &mut insp)
+            .unwrap();
     assert!(res.result.is_success());
     print_traces(&insp);
 
@@ -172,7 +182,9 @@ fn test_parity_call_selfdestruct() {
     // evm.env.tx.caller = caller;
     // let res = evm.call(to, input.to_vec().into(), &mut insp).unwrap();
 
-    let (res, _) = inspect(&mut evm.db, env, &mut insp).unwrap();
+    let (res, _) =
+        inspect::<TestWiring<'_, &mut TracingInspector>>(&mut evm.db, env, evm.spec_id, &mut insp)
+            .unwrap();
     match &res.result {
         ExecutionResult::Success { output, .. } => match output {
             Output::Call(_) => {}
@@ -212,8 +224,6 @@ fn test_parity_statediff_blob_commit() {
 
     let mut db = CacheDB::new(EmptyDB::default());
 
-    let cfg = CfgEnvWithHandlerCfg::new(CfgEnv::default(), HandlerCfg::new(SpecId::CANCUN));
-
     db.insert_account_info(
         caller,
         AccountInfo { balance: U256::from(u64::MAX), ..Default::default() },
@@ -221,29 +231,29 @@ fn test_parity_statediff_blob_commit() {
 
     let to = address!("15dd773dad3f630773a0e771e9b221f4c8b9b939");
 
-    let env = EnvWithHandlerCfg::new_with_cfg_env(
-        cfg.clone(),
-        BlockEnv {
-            basefee: U256::from(100),
-            blob_excess_gas_and_price: Some(BlobExcessGasAndPrice::new(100)),
-            ..Default::default()
-        },
-        TxEnv {
-            caller,
-            gas_limit: 1000000,
-            transact_to: TransactTo::Call(to),
-            gas_price: U256::from(150),
-            blob_hashes: vec!["0x01af2fd94f17364bc8ef371c4c90c3a33855ff972d10b9c03d0445b3fca063ea"
-                .parse()
-                .unwrap()],
-            max_fee_per_blob_gas: Some(U256::from(1000000000)),
-            ..Default::default()
-        },
-    );
+    let block_env = BlockEnv {
+        basefee: U256::from(100),
+        blob_excess_gas_and_price: Some(BlobExcessGasAndPrice::new(100)),
+        ..Default::default()
+    };
+    let tx_env = TxEnv {
+        caller,
+        gas_limit: 1000000,
+        transact_to: TransactTo::Call(to),
+        gas_price: U256::from(150),
+        blob_hashes: vec!["0x01af2fd94f17364bc8ef371c4c90c3a33855ff972d10b9c03d0445b3fca063ea"
+            .parse()
+            .unwrap()],
+        max_fee_per_blob_gas: Some(U256::from(1000000000)),
+        ..Default::default()
+    };
+    let env = Env::boxed(CfgEnv::default(), block_env, tx_env);
 
     let trace_types = HashSet::from_iter([TraceType::StateDiff]);
     let mut insp = TracingInspector::new(TracingInspectorConfig::from_parity_config(&trace_types));
-    let (res, _) = inspect(&mut db, env, &mut insp).unwrap();
+    let (res, _) =
+        inspect::<TestWiring<'_, &mut TracingInspector>>(&mut db, env, SpecId::CANCUN, &mut insp)
+            .unwrap();
     let mut full_trace = insp.into_parity_builder().into_trace_results(&res.result, &trace_types);
 
     let state_diff = full_trace.state_diff.as_mut().unwrap();
@@ -279,6 +289,7 @@ fn test_parity_delegatecall_selfdestruct() {
     let deployer = address!("341348115259a8bf69f1f50101c227fced83bac6");
 
     let mut evm = TestEvm::new();
+    evm.disable_nonce_check();
 
     // Deploy DelegateCall contract
     let delegate_addr = evm.simple_deploy(delegate_code.into());
@@ -301,7 +312,7 @@ fn test_parity_delegatecall_selfdestruct() {
         ..Default::default()
     });
 
-    let (res, _) = inspect(&mut evm.db, env, &mut insp).unwrap();
+    let (res, _) = inspect::<TestWiring<'_, _>>(&mut evm.db, env, evm.spec_id, &mut insp).unwrap();
     assert!(res.result.is_success());
 
     let traces =

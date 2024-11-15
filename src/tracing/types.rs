@@ -10,7 +10,8 @@ use alloy_rpc_types_trace::{
         SelfdestructAction, TraceOutput, TransactionTrace,
     },
 };
-use revm::interpreter::{opcode, CallScheme, CreateScheme, InstructionResult, OpCode};
+use revm_bytecode::{opcode, opcode::OpCode};
+use revm_interpreter::{CallScheme, CreateScheme, InstructionResult};
 use std::collections::VecDeque;
 
 /// Decoded call data.
@@ -830,6 +831,7 @@ impl AsRef<[u8]> for RecordedMemory {
 #[cfg(feature = "serde")]
 mod opcode_serde {
     use super::OpCode;
+    use revm_bytecode::opcode;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub(super) fn serialize<S>(op: &OpCode, serializer: S) -> Result<S::Ok, S::Error>
@@ -844,7 +846,6 @@ mod opcode_serde {
         D: Deserializer<'de>,
     {
         let op = u8::deserialize(deserializer)?;
-        Ok(OpCode::new(op)
-            .unwrap_or_else(|| OpCode::new(revm::interpreter::opcode::INVALID).unwrap()))
+        Ok(OpCode::new(op).unwrap_or_else(|| OpCode::new(opcode::INVALID).unwrap()))
     }
 }

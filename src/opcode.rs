@@ -1,11 +1,12 @@
 use alloy_rpc_types_trace::opcode::OpcodeGas;
 use revm::{
     interpreter::{
-        opcode::{self, OpCode},
         Interpreter,
     },
-    Database, EvmContext, Inspector,
+    EvmWiring, EvmContext,
 };
+use revm_inspector::Inspector;
+use revm_bytecode::opcode::{self, OpCode};
 use std::collections::HashMap;
 
 /// An Inspector that counts opcodes and measures gas usage per opcode.
@@ -59,7 +60,7 @@ impl OpcodeGasInspector {
 
 impl<DB> Inspector<DB> for OpcodeGasInspector
 where
-    DB: Database,
+    DB: EvmWiring,
 {
     fn step(&mut self, interp: &mut Interpreter, _context: &mut EvmContext<DB>) {
         let opcode_value = interp.current_opcode();
@@ -101,9 +102,11 @@ pub fn immediate_size(op: OpCode, bytes_after: &[u8]) -> u8 {
 mod tests {
     use super::*;
     use revm::{
-        db::{CacheDB, EmptyDB},
-        interpreter::{opcode, Contract},
+        interpreter::{Contract},
     };
+    use revm::database_interface::EmptyDB;
+    use revm::wiring::EthereumWiring;
+    use revm_database::CacheDB;
 
     #[test]
     fn test_opcode_counter_inspector() {
@@ -121,7 +124,7 @@ mod tests {
 
         for &opcode in &opcodes {
             interpreter.instruction_pointer = &opcode.get();
-            opcode_counter.step(&mut interpreter, &mut EvmContext::new(db.clone()));
+            opcode_counter.step(&mut interpreter, &mut EvmContext::<EthereumWiring<_, ()>>::new(db.clone()));
         }
     }
 
@@ -143,7 +146,7 @@ mod tests {
 
         for opcode in opcodes.iter() {
             interpreter.instruction_pointer = opcode;
-            opcode_counter.step(&mut interpreter, &mut EvmContext::new(db.clone()));
+            opcode_counter.step(&mut interpreter, &mut EvmContext::<EthereumWiring<_, ()>>::new(db.clone()));
         }
     }
 }

@@ -3,9 +3,10 @@
 use alloy_primitives::{hex, Bytes};
 use alloy_sol_types::{ContractError, GenericRevertReason};
 use revm::{
-    primitives::{SpecId, KECCAK_EMPTY},
+    primitives::{KECCAK_EMPTY},
     DatabaseRef,
 };
+use revm::specification::hardfork::SpecId;
 
 /// Formats memory data into a list of 32-byte hex-encoded chunks.
 ///
@@ -38,7 +39,7 @@ pub(crate) fn gas_used(spec: SpecId, spent: u64, refunded: u64) -> u64 {
 #[inline]
 pub(crate) fn load_account_code<DB: DatabaseRef>(
     db: DB,
-    db_acc: &revm::primitives::AccountInfo,
+    db_acc: &revm::state::AccountInfo,
 ) -> Option<Bytes> {
     db_acc
         .code

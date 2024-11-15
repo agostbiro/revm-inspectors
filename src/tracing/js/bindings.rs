@@ -17,13 +17,15 @@ use boa_engine::{
 };
 use boa_gc::{empty_trace, Finalize, Trace};
 use revm::{
-    interpreter::{
-        opcode::{PUSH0, PUSH32},
-        OpCode, SharedMemory, Stack,
-    },
-    primitives::{AccountInfo, Bytecode, EvmState, KECCAK_EMPTY},
+    state::{AccountInfo, EvmState},
     DatabaseRef,
 };
+use revm_bytecode::{
+    opcode::{OpCode, PUSH0, PUSH32},
+    Bytecode,
+};
+use revm_interpreter::{SharedMemory, Stack};
+use revm_primitives::KECCAK_EMPTY;
 use std::{cell::RefCell, rc::Rc};
 
 /// A macro that creates a native function that returns via [JsValue::from]
@@ -976,7 +978,8 @@ mod tests {
         json_stringify, register_builtins, to_serde_value, BIG_INT_JS,
     };
     use boa_engine::{property::Attribute, Source};
-    use revm::db::{CacheDB, EmptyDB};
+    use revm::database_interface::EmptyDB;
+    use revm_database::CacheDB;
 
     #[test]
     fn test_contract() {
